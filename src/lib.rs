@@ -16,6 +16,7 @@
 
 pub mod protocols;
 pub mod utilities;
+pub mod swarm_api;
 #[derive(Copy, PartialEq, Eq, Clone, Debug)]
 pub enum Error {
     InvalidKey,
