@@ -89,6 +89,7 @@ pub struct Index {
 pub struct Entry {
     pub key: Key,
     pub value: String,
+    receiver: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -153,141 +154,177 @@ pub fn check_sig(r: &FE, s: &FE, msg: &BigInt, pk: &GE) {
     assert!(is_correct);
 }
 
+#[derive(NetworkBehaviour)]
+struct DKG_NW_Behaviour {
+    floodsub: Floodsub,
+    mdns: TokioMdns,
+    #[behaviour(ignore)]
+    response_sender: mpsc::UnboundedSender<Entry>,
+}
+
+impl NetworkBehaviourEventProcess<FloodsubEvent> for DKG_NW_Behaviour {
+    // Called when `floodsub` produces an event.
+    //#[tokio::inject_event]
+    fn inject_event(&mut self, event: FloodsubEvent) { // recieved data on floodsubpub channel in switch from other peer/s
+        match event {
+            FloodsubEvent::Message(msg) => {
+                if let Ok(resp) = serde_json::from_slice::<Entry>(&msg.data) {
+                    if resp.receiver == PEER_ID.to_string() { // means response is for this node
+                        info!("Response from {}:", msg.source);
+                        // resp.data.iter().for_each(|r| info!("{:?}", r));
+                    }
+                }
+                // else check for other kind of response data, above will lead to error
+            }
+            _ => (),
+        }
+    }
+}
+
+impl NetworkBehaviourEventProcess<MdnsEvent> for DKG_NW_Behaviour {
+    // Called when `mdns` produces an event.
+    fn inject_event(&mut self, event: MdnsEvent) { // if any peer connects or discconects this will be called
+        match event {
+            MdnsEvent::Discovered(list) => {
+                let mut count = 0;
+                for (peer, _) in list {
+                    println!("\nDiscovered: {:?}", &peer);
+                    self.floodsub.add_node_to_partial_view(peer);
+                    count += 1;
+                }
+                if count == num_of_participant {
+                    get_keys_with_peer_num();
+                }
+                else{
+                    println!("waiting for the other participants to join for dkg...");
+                }
+                
+            }
+                
+            MdnsEvent::Expired(list) =>
+                for (peer, _) in list {
+                    if !self.mdns.has_node(&peer) {
+                        println!("\nExpired: {:?}", &peer);
+                        self.floodsub.remove_node_from_partial_view(&peer);
+                    }
+                }
+        }
+    }
+}
+
+
+static KEYS: Lazy<identity::Keypair> = Lazy::new(|| identity::Keypair::generate_ed25519());
+static PEER_ID: Lazy<PeerId> = Lazy::new(|| PeerId::from(KEYS.public()));
+static TOPIC: Lazy<Topic> = Lazy::new(|| floodsub::Topic::new("dkg-community"));
+
+static mut peer_num: usize = 1;
+static mut num_of_participant: usize = 0;
+static mut threshold: usize = 0;
+static mut party_nums: HashMap<PeerId, usize>;
 /// The `tokio::main` attribute sets up a tokio runtime.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     env_logger::init();
     
     // Create a random PeerId
-    let id_keys = identity::Keypair::generate_ed25519();
-    let peer_id = PeerId::from(id_keys.public());
+    // let id_keys = identity::Keypair::generate_ed25519();
+    // let peer_id = PeerId::from(id_keys.public());
     println!("Local peer id: {:?}", peer_id);
     println!("CHAT----TOKIO");
 
     // Create a keypair for authenticated encryption of the transport.
     // priv-pub pair
     let noise_keys = noise::Keypair::<noise::X25519Spec>::new()
-        .into_authentic(&id_keys)
+        .into_authentic(&KEYS)
         .expect("Signing libp2p-noise static DH keypair failed.");
 
     // Create a tokio-based TCP transport use noise for authenticated
     // encryption and Mplex for multiplexing of substreams on a TCP stream.
-    let transport = TokioTcpConfig::new().nodelay(true)
+    let transp = TokioTcpConfig::new().nodelay(true)
         .upgrade(upgrade::Version::V1)
         .authenticate(noise::NoiseConfig::xx(noise_keys).into_authenticated())
         .multiplex(mplex::MplexConfig::new())
         .boxed();
-
-    // Create a Floodsub topic
-    let floodsub_topic = floodsub::Topic::new("dkg-community");
-
-    let (tx0, mut rx) = mpsc::channel(8); // capacity of 8
-    let tx1 = tx0.clone(); // create another sender
     
-    #[derive(NetworkBehaviour)]
-    struct MyBehaviour {
-        floodsub: Floodsub,
-        mdns: Mdns,
-        #[behaviour(ignore)]
-        response_sender: mpsc::UnboundedSender<Entry>,
-    }
-
-    impl NetworkBehaviourEventProcess<FloodsubEvent> for MyBehaviour {
-        // Called when `floodsub` produces an event.
-        //#[tokio::inject_event]
-        fn inject_event(&mut self, event: FloodsubEvent) {
-            // if let FloodsubEvent::Message(event) = event {
-            //     let msg = String::from_utf8_lossy(&event.data);
-            //     println!("Received: '{:?}' from {:?}", msg, event.source);
-            // }
-
-            match event {
-                FloodsubEvent::Message(msg) => {
-                    if let Ok(resp) = serde_json::from_slice::<Entry>(&msg.data) {
-                        if resp.receiver == PEER_ID.to_string() {
-                            info!("Response from {}:", msg.source);
-                            resp.data.iter().for_each(|r| info!("{:?}", r));
-                        }
-                    } else if let Ok(req) = serde_json::from_slice::<ListRequest>(&msg.data) {
-                        match req.mode {
-                            ListMode::ALL => {
-                                info!("Received ALL req: {:?} from {:?}", req, msg.source);
-                                respond_with_public_recipes(
-                                    self.response_sender.clone(),
-                                    msg.source.to_string(),
-                                );
-                            }
-                            ListMode::One(ref peer_id) => {
-                                if peer_id == &PEER_ID.to_string() {
-                                    info!("Received req: {:?} from {:?}", req, msg.source);
-                                    respond_with_public_recipes(
-                                        self.response_sender.clone(),
-                                        msg.source.to_string(),
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-                _ => (),
-            }
-        }
-    }
-
-    impl NetworkBehaviourEventProcess<MdnsEvent> for MyBehaviour {
-        // Called when `mdns` produces an event.
-        fn inject_event(&mut self, event: MdnsEvent) {
-            match event {
-                MdnsEvent::Discovered(list) =>
-                    for (peer, _) in list {
-                        println!("\nDiscovered: {:?}", &peer);
-                        self.floodsub.add_node_to_partial_view(peer);
-                    }
-                MdnsEvent::Expired(list) =>
-                    for (peer, _) in list {
-                        if !self.mdns.has_node(&peer) {
-                            println!("\nExpired: {:?}", &peer);
-                            self.floodsub.remove_node_from_partial_view(&peer);
-                        }
-                    }
-            }
-        }
-    }
+    let mut behaviour = RecipeBehaviour {
+        floodsub: Floodsub::new(PEER_ID.clone()),
+        mdns: TokioMdns::new().expect("can create mdns"),
+        response_sender,
+    };
+    
+    behaviour.floodsub.subscribe(TOPIC.clone());
 
     // Create a Swarm to manage peers and events.
-    let mut swarm = {
-        let mdns = Mdns::new(Default::default()).await?;
-        let mut behaviour = MyBehaviour {
-            floodsub: Floodsub::new(peer_id.clone()),
-            mdns,
-        };
+    let mut swarm = SwarmBuilder::new(transp, behaviour, PEER_ID.clone())
+        .executor(Box::new(|fut| {
+            tokio::spawn(fut);
+        }))
+        .build();
 
-        behaviour.floodsub.subscribe(floodsub_topic.clone());
 
-        SwarmBuilder::new(transport, behaviour, peer_id)
-            // We want the connection background tasks to be spawned
-            // onto the tokio runtime.
-            .executor(Box::new(|fut| { tokio::spawn(fut); }))
-            .build()
-    };
-
-    // Reach out to another node if specified
-    if let Some(to_dial) = std::env::args().nth(1) {
-        let addr: Multiaddr = to_dial.parse()?;
-        swarm.dial_addr(addr)?;
-        println!("Dialed {:?}", to_dial)
-    }
-
-    // Read full lines from stdin
-    // let mut stdin = tokio::io::BufReader::new(async_std::io::stdin()).lines();
-
-    // Listen on all interfaces and whatever port the OS assigns
-    swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+    Swarm::listen_on(
+        &mut swarm,
+        "/ip4/0.0.0.0/tcp/0"
+            .parse()
+            .expect("can get a local socket"),
+    )
+    .expect("swarm can be started");
 
 
     // dkg code starts here
 
-    let delay = time::Duration::from_millis(25);
+    (threshold, num_of_participant) = dkg_init();
+
+
+    // -=-=-=----=-=-=-=-=-=-=-=-=-
+
+    // start the libp2p swarm with tokio
+    loop {
+        let evt = { // 6
+            tokio::select! {
+                event = swarm.select_next_some() => {
+                    println!("\nswtch event: {:?}", event);
+                    if let SwarmEvent::NewListenAddr { address, .. } = event {
+                        println!("Listening on {:?}", address);
+                        SwarmEvent::NewListenAddr(address)
+                    }
+                    None
+                }
+                resp_to_be_sent = response_rcv.recv() => { // here we take data (response to be sent to other peers) from channel // 4
+                    dbg!("\nresponse: {:?}", &resp_to_be_sent);
+                    Some(EventType::Response(resp_to_be_sent.expect("response exists"))) // return event type response // 5
+                },
+            }
+        };
+
+        if let Some(event) = evt { // 7
+            match event { // 8
+                EventType::Response(resp) => { // 9
+                    dbg!("event type: Reasponse {:?}", &resp);
+                    let json = serde_json::to_string(&resp).expect("can jsonify response"); // prepare the response to be sent to other peers
+                    swarm.floodsub.publish(TOPIC.clone(), json.as_bytes()); // 10
+                },
+                _ => {
+                    dbg!("eventype: not implemented");
+                },
+            }
+        }
+    }
+}
+
+fn uniq_peers(swarm: &mut RecipeBehaviour) {
+    info!("Discovered Peers: {:?}", ConnectedPoint::is_dialer(swarm));
+    let nodes = swarm.mdns.discovered_nodes();
+    let mut unique_peers = HashSet::new();
+    for peer in nodes {
+        unique_peers.insert(peer);
+    }
+    unique_peers.iter().for_each(|p| info!("{}", &p));
+    info!("peers count: {}", unique_peers.iter().count());
+}
+
+
+fn dkg_init() -> Parameters {
     println!("DKG Started.");
     let data = fs::read_to_string("params.json")
         .expect("Unable to read params, make sure config file is present in the same folder ");
@@ -295,42 +332,38 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let PARTIES: u16 = params.parties.parse::<u16>().unwrap();
     let THRESHOLD: u16 = params.threshold.parse::<u16>().unwrap();
     
-    let params = Parameters {
+    let uuid = PEER_ID.clone(); 
+    println!("number: {:?}, uuid: {:?}", peer_num, uuid);
+    
+    Parameters {
         threshold: THRESHOLD,
         share_count: PARTIES,
-    };
-
-
-
-
-    // -=-=-=----=-=-=-=-=-=-=-=-=-
-
-
-    let mut i: u128 = 0;
-    // start the libp2p swarm with tokio
-    loop { // loop for forever
-        println!("\nbefore tokio select");
-        tokio::select! {
-            Some(resp) = rx.recv().await => {
-                // let line = line?.expect("stdin closed");
-                handle_response(resp);
-                swarm.behaviour_mut().floodsub.publish(floodsub_topic.clone(), line.as_bytes());
-            }
-            event = swarm.select_next_some() => {
-                println!("\nswtch event: {:?}", event);
-                if let SwarmEvent::NewListenAddr { address, .. } = event {
-                    println!("Listening on {:?}", address);
-                }
-            }
-            
-        }
-        println!("\nI: {}", i);
-        i = i + 1;
     }
+
 }
 
-fn handle_response(resp: string){
-    println!("handling response: {}", resp);
+fn get_keys_with_peer_num() {
+    let party_keys = Keys::create(party_num_int as usize);
+    let (bc_i, decom_i) = party_keys.phase1_broadcast_phase3_proof_of_correct_key();
+    //let str: multi_party_ecdsa::protocols::multi_party_ecdsa::gg_2018::party_i::KeyGenBroadcastMessage1 = bc_i.clone();
+    // send commitment to ephemeral public keys, get round 1 commitments of other parties
+    assert!(broadcast(
+        &client,
+        party_num_int,
+        "round1",
+        serde_json::to_string(&bc_i).unwrap(),
+        uuid.clone()
+    )
+    .is_ok());
+    let round1_ans_vec = poll_for_broadcasts(
+        &client,
+        party_num_int,
+        PARTIES,
+        delay,
+        "round1",
+        uuid.clone(),
+    );
 }
+
 
 
