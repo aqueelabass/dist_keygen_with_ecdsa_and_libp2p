@@ -19,37 +19,20 @@ use dist_keygen_with_ecdsa_and_libp2p::protocols::multi_party_ecdsa::gg_2018::pa
     KeyGenDecommitMessage1
 };
 
-use libp2p::{
-    mplex,
-    noise,
-    Swarm,
-    PeerId,
-    identity,
-    Multiaddr,
-    Transport,
-    core::upgrade,
-    NetworkBehaviour,
-    tcp::TokioTcpConfig,
-    
-    floodsub::{
+use libp2p::{Multiaddr, NetworkBehaviour, PeerId, Swarm, Transport, core::upgrade, floodsub::{
         Topic,
         Floodsub, 
         FloodsubEvent, 
-    },
-    
-    mdns::{
+    }, identity, mdns::{
         MdnsEvent, 
         TokioMdns
-    },
-    
-    swarm::{
+    }, mplex, noise, ping::{Ping, PingConfig, PingEvent}, swarm::{
         SwarmEvent, 
         SwarmBuilder,
         ExpandedSwarm,
         NetworkBehaviour,
         NetworkBehaviourEventProcess
-    },
-};
+    }, tcp::TokioTcpConfig};
 
 use crypto::{
     aead::{
@@ -93,26 +76,13 @@ use env_logger::{Builder, Env};
 
 use async_std::{io, task};
 
-use std::{ 
-    fs, 
-    env, 
-    time,
-    thread,
-    hash::{
+use std::{collections::HashMap, collections::HashSet, collections::hash_map::DefaultHasher, env, error::Error, fs, hash::{
         Hash, 
         Hasher
-    },    
-    task::{
+    }, iter::repeat, num::NonZeroU32, task::{
         Poll,
         Context
-    }, 
-    iter::repeat, 
-    error::Error,
-    time::Duration, 
-    collections::HashMap, 
-    collections::HashSet,
-    collections::hash_map::DefaultHasher
-};
+    }, thread, time, time::Duration};
 
 // ------------- End of dependencies section ----------------
 
@@ -227,6 +197,7 @@ struct DKG_NW_Behaviour {
     floodsub: Floodsub,
     mdns: TokioMdns,
     swarmapi: SwarmApi,
+    ping: Ping,
     #[behaviour(ignore)]
     response_sender: mpsc::UnboundedSender<String>,
     #[behaviour(ignore)]
@@ -243,6 +214,16 @@ struct DKG_NW_Behaviour {
     PID: String,
     
     
+}
+
+impl NetworkBehaviourEventProcess<PingEvent> for DKG_NW_Behaviour {
+    fn inject_event(&mut self, event: PingEvent) {
+        match event {
+            PingEvent => {
+                // 
+            }
+        }
+    }
 }
 
 impl NetworkBehaviourEventProcess<M_SwarmEvent> for DKG_NW_Behaviour {
@@ -362,6 +343,7 @@ impl NetworkBehaviourEventProcess<MdnsEvent> for DKG_NW_Behaviour {
     }
 }
 
+
 /// The `tokio::main` attribute sets up a tokio runtime.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -386,6 +368,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .authenticate(noise::NoiseConfig::xx(noise_keys).into_authenticated())
         .multiplex(mplex::MplexConfig::new())
         .boxed();
+
+    let ping =  Ping::new(PingConfig::new().with_keep_alive(true));
     
     let (response_sender, mut response_rcv) = mpsc::unbounded_channel();
     let peer_indeces:  HashMap<String, usize> = HashMap::new();
@@ -399,6 +383,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         floodsub: Floodsub::new(PEER_ID.clone()),
         mdns: TokioMdns::new().expect("can create mdns"),
         swarmapi: SwarmApi::new(), 
+        ping: ping,
         response_sender,
         peer_indeces,
         num_of_participant,
