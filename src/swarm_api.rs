@@ -54,6 +54,7 @@ impl NetworkBehaviour for SwarmApi {
         _connection: ConnectionId,
         _event: <<Self::ProtocolsHandler as IntoProtocolsHandler>::Handler as ProtocolsHandler>::OutEvent,
     ) {
+        println!("\n\n** inject event from within the swarmapi. connectionId: {:?}", _connection);
     }
 
     fn poll(

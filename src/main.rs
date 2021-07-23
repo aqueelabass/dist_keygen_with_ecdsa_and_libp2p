@@ -44,7 +44,8 @@ use libp2p::{
     
     swarm::{
         SwarmEvent, 
-        SwarmBuilder, 
+        SwarmBuilder,
+        ExpandedSwarm,
         NetworkBehaviour,
         NetworkBehaviourEventProcess
     },
@@ -236,6 +237,11 @@ struct DKG_NW_Behaviour {
     peer_count: usize,
     #[behaviour(ignore)]
     threshold: usize,
+    #[behaviour(ignore)]
+    round_which: usize,
+    #[behaviour(ignore)]
+    PID: String,
+    
     
 }
 
@@ -244,14 +250,23 @@ impl NetworkBehaviourEventProcess<M_SwarmEvent> for DKG_NW_Behaviour {
         match event {
             M_SwarmEvent::PeerConnected(peer_id) => {
                 println!("peer connected. peerid: {}", peer_id);
+                let k = peer_id.to_base58();
+                if !self.peer_indeces.contains_key(&k) {
+                    self.peer_indeces.insert(k.clone(), 0);
+                    
+                    unsafe{
+                        PEER_INDEX = 0;
+                    }
+                    
+                }
                 // self.events.push(BehaviourEventOut::PeerConnected(peer_id))
             }
             M_SwarmEvent::PeerDisconnected(peer_id) => {
                 let k = peer_id.to_base58();
                 println!("peer dis-connected. peerid: {}", k);
-                println!("Before: {:?}", &self.peer_indeces);
-                self.peer_indeces.remove(&k);
-                println!("After: {:?}", &self.peer_indeces);
+                // println!("Before: {:?}", &self.peer_indeces);
+                // self.peer_indeces.remove(&k);
+                // println!("After: {:?}", &self.peer_indeces);
 
                 // self.events.push(BehaviourEventOut::PeerDisconnected(peer_id))
             }
@@ -288,13 +303,42 @@ impl NetworkBehaviourEventProcess<MdnsEvent> for DKG_NW_Behaviour {
     fn inject_event(&mut self, event: MdnsEvent) { // if any peer connects or discconects this will be called
         match event {
             MdnsEvent::Discovered(list) => {
-                //println!("\nDiscovered a new peer. nop: {}, pc: {}", &self.num_of_participant, &self.peer_count);
+                println!("\nDiscovered a new peer. nop: {}, pc: {}", &self.num_of_participant, &self.peer_count);
                 for (peer, _) in list {
                     self.floodsub.add_node_to_partial_view(peer);
                 }
                 uniq_peers(self);
                 if self.num_of_participant > 0 && self.peer_count == self.num_of_participant {
-                    get_keys_with_peer_num();
+                    if self.round_which == 0 {
+                        get_keys_with_peer_num(self);
+                        println!("round 1 completed.");
+                        self.round_which += 1;
+                    }
+                    else if self.round_which == 1 {
+
+                        println!("round 2 completed.");
+                        self.round_which += 1;
+                    }
+                    else if self.round_which == 2 {
+
+                        println!("round 3 completed.");
+                        self.round_which += 1;    
+                    }
+                    else if self.round_which == 3 {
+
+                        println!("round 4 completed.");
+                        self.round_which += 1;    
+                    }
+                    else if self.round_which == 4 {
+
+                        println!("round 5 completed.");
+                        self.round_which += 1;    
+                    }
+                    else if self.round_which == 5 {
+
+                        println!("round 6 completed.");
+                        self.round_which += 1;    
+                    }
                 }
                 else{
                     //println!("peer_indeces: {:?}", self.peer_indeces);
@@ -348,6 +392,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let num_of_participant: usize = 0;
     let peer_count: usize = 0;
     let threshold: usize = 0;
+    let round_which: usize = 0;
+    let PID: String = PEER_ID.clone().to_base58();
     
     let mut behaviour = DKG_NW_Behaviour {
         floodsub: Floodsub::new(PEER_ID.clone()),
@@ -358,30 +404,34 @@ async fn main() -> Result<(), Box<dyn Error>> {
         num_of_participant,
         peer_count,
         threshold,
+        round_which,
+        PID,
     };
     
     behaviour.floodsub.subscribe(TOPIC.clone());
 
     // Create a Swarm to manage peers and events.
-    let mut swarm = SwarmBuilder::new(transp, behaviour, PEER_ID.clone())
+    let mut _swarm = SwarmBuilder::new(transp, behaviour, PEER_ID.clone())
         .executor(Box::new(|fut| {
             tokio::spawn(fut);
         }))
         .build();
 
+        // Reach out to another node if specified
+    if let Some(to_dial) = std::env::args().nth(1) {
+        let addr = to_dial.parse()?;
+        Swarm::dial_addr(&mut _swarm, addr)?;
+        println!("Dialed {:?}", to_dial)
+    }
 
-    Swarm::listen_on(
-        &mut swarm,
-        "/ip4/0.0.0.0/tcp/0"
-            .parse()
-            .expect("can get a local socket"),
-    )
-    .expect("swarm can be started");
+    // Swarm::KeepAlive::Until(Duration::from_secs(10) as time::Instant);
+
+    Swarm::listen_on(&mut _swarm,"/ip4/0.0.0.0/tcp/5687".parse()?)?;
 
 
     // dkg code starts here
 
-    dkg_init(&mut swarm);
+    dkg_init(&mut _swarm);
 
 
     // -=-=-=----=-=-=-=-=-=-=-=-=-
@@ -393,22 +443,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
             resp_to_be_sent = response_rcv.recv() => { // here we take data (response to be sent to other peers) from channel // 4
                 //println!("==> getting from channel: {:?}", &resp_to_be_sent);
                 println!("==> sending to other peer/s. Topic: {:?}", &TOPIC);
-                swarm.floodsub.publish(TOPIC.clone(), resp_to_be_sent.unwrap().as_bytes());
+                _swarm.floodsub.publish(TOPIC.clone(), resp_to_be_sent.unwrap().as_bytes());
             }
             // branch 2
-            event = swarm.select_next_some() => {
-                //println!("\nswtch event: {:?}", event);
-                //if let SwarmEvent::NewListenAddr { address, .. } = event {
-                //    //println!("Listening on {:?}", address);
-                //}
+            event = _swarm.select_next_some() => {
+                println!("\n\nEvent: {:?}", event);
+                // if let SwarmEvent::ConnectionEstablished { peer_id, ..} = event {
+                //     println!("Listening on {:?}", peer_id);
+                // }
             }
         };
     }
 }
 
-fn uniq_peers(swarm: &mut DKG_NW_Behaviour) {
+fn uniq_peers(_swarm: &mut DKG_NW_Behaviour) {
     //println!("getting unique peers and then count");
-    let nodes = swarm.mdns.discovered_nodes();
+    let nodes = _swarm.mdns.discovered_nodes();
     let mut unique_peers = HashSet::new();
     for peer in nodes {
         unique_peers.insert(peer);
@@ -419,8 +469,8 @@ fn uniq_peers(swarm: &mut DKG_NW_Behaviour) {
     });
     //println!("peers count: {}", &count);
     let k = PEER_ID.to_base58();
-    if !swarm.peer_indeces.contains_key(&k) {
-        swarm.peer_indeces.insert(k.clone(), count);
+    if !_swarm.peer_indeces.contains_key(&k) {
+        //_swarm.peer_indeces.insert(k.clone(), count);
         
         unsafe{
             PEER_INDEX = count.clone();
@@ -431,31 +481,31 @@ fn uniq_peers(swarm: &mut DKG_NW_Behaviour) {
     if count > 1 {
         let k = PEER_ID.to_base58();
         let p = PartySignup {
-            number: match swarm.peer_indeces.get(&k){
+            number: match _swarm.peer_indeces.get(&k){
                 Some(&num) => num,
                 _ => panic!(),
             },
             uuid: k,
         };
         //println!("==> putting over channel");
-        swarm.response_sender.send(serde_json::to_string(&p).unwrap());
+        _swarm.response_sender.send(serde_json::to_string(&p).unwrap());
     }
     
-    swarm.peer_count = count;
-    //println!("peer_indeces: {:?}", &swarm.peer_indeces);
+    _swarm.peer_count = count+1;
+    //println!("peer_indeces: {:?}", &_swarm.peer_indeces);
 }
 
 
-fn dkg_init(swarm: &mut DKG_NW_Behaviour) {
+fn dkg_init(_swarm: &mut DKG_NW_Behaviour) {
     //println!("[DKG] ==> DKG Started.");
     let data = fs::read_to_string("params.json")
         .expect("Unable to read params, make sure config file is present in the same folder ");
     let params: Params = serde_json::from_str(&data).unwrap();
-    swarm.num_of_participant = params.parties.parse::<u16>().unwrap() as usize;
-    swarm.threshold = params.threshold.parse::<u16>().unwrap() as usize;
+    _swarm.num_of_participant = params.parties.parse::<u16>().unwrap() as usize;
+    _swarm.threshold = params.threshold.parse::<u16>().unwrap() as usize;
 }
 
-fn get_keys_with_peer_num() {
+fn get_keys_with_peer_num(_swarm: &mut DKG_NW_Behaviour) {
     //println!("[DKG] ==> getting keys");
     unsafe{
         let peer_keys = Keys::create(PEER_INDEX);
