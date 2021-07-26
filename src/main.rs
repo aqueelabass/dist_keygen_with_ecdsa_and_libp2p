@@ -19,7 +19,14 @@ use dist_keygen_with_ecdsa_and_libp2p::protocols::multi_party_ecdsa::gg_2018::pa
     KeyGenDecommitMessage1
 };
 
-use libp2p::{Multiaddr, NetworkBehaviour, PeerId, Swarm, Transport, core::upgrade, floodsub::{
+use libp2p::{
+    PeerId, 
+    Swarm, 
+    Transport, 
+    Multiaddr, 
+    core::upgrade, 
+    NetworkBehaviour, 
+    floodsub::{
         Topic,
         Floodsub, 
         FloodsubEvent, 
@@ -91,7 +98,6 @@ use std::{collections::HashMap, collections::HashSet, collections::hash_map::Def
 static KEYS: Lazy<identity::Keypair> = Lazy::new(|| identity::Keypair::generate_ed25519());
 static PEER_ID: Lazy<PeerId> = Lazy::new(|| PeerId::from(KEYS.public()));
 static TOPIC: Lazy<Topic> = Lazy::new(|| Topic::new("dkg-community"));
-static mut PEER_INDEX: usize = 0;
 
 // --------------------------------------
 
@@ -107,9 +113,9 @@ pub struct AEAD {
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
-pub struct PartySignup {
-    pub number: usize,
-    pub uuid: String,
+pub struct PeerInfo {
+    pub index: usize,
+    pub pid: String,
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -211,6 +217,8 @@ struct DKG_NW_Behaviour {
     #[behaviour(ignore)]
     round_which: usize,
     #[behaviour(ignore)]
+    index: usize,
+    #[behaviour(ignore)]
     PID: String,
     
     
@@ -230,16 +238,48 @@ impl NetworkBehaviourEventProcess<M_SwarmEvent> for DKG_NW_Behaviour {
     fn inject_event(&mut self, event: <SwarmApi as NetworkBehaviour>::OutEvent) {
         match event {
             M_SwarmEvent::PeerConnected(peer_id) => {
-                println!("peer connected. peerid: {}", peer_id);
-                let k = peer_id.to_base58();
-                if !self.peer_indeces.contains_key(&k) {
-                    self.peer_indeces.insert(k.clone(), 0);
-                    
-                    unsafe{
-                        PEER_INDEX = 0;
+                println!("\nnew peer connected. peerid: {}", peer_id);
+                println!("\nnop: {}, pc: {}, index: {}", &self.num_of_participant, &self.peer_count, &self.index);
+                self.peer_count += 1;
+                
+                let p = PeerInfo {
+                    index: self.index,
+                    pid: self.PID.clone(),
+                };
+                //println!("==> putting over channel");
+                
+                self.response_sender.send(serde_json::to_string(&p).unwrap());
+                if self.num_of_participant > 0 && self.peer_count == self.num_of_participant {
+                    if self.round_which == 0 {
+                        println!("round 1 starts.");
+                        get_keys_with_peer_num(self);
+                        self.round_which += 1;
                     }
-                    
+                    else if self.round_which == 1 {
+                        println!("round 2 starts.");
+                        self.round_which += 1;
+                    }
+                    else if self.round_which == 2 {
+                        println!("round 3 starts.");
+                        self.round_which += 1;    
+                    }
+                    else if self.round_which == 3 {
+                        println!("round 4 starts.");
+                        self.round_which += 1;    
+                    }
+                    else if self.round_which == 4 {
+                        println!("round 5 starts.");
+                        self.round_which += 1;    
+                    }
+                    else if self.round_which == 5 {
+                        println!("round 6 starts.");
+                        self.round_which += 1;    
+                    }
                 }
+                else{
+                    //println!("peer_indeces: {:?}", self.peer_indeces);
+                    //println!("waiting for the other participants to join for dkg...");
+                } 
                 // self.events.push(BehaviourEventOut::PeerConnected(peer_id))
             }
             M_SwarmEvent::PeerDisconnected(peer_id) => {
@@ -262,12 +302,15 @@ impl NetworkBehaviourEventProcess<FloodsubEvent> for DKG_NW_Behaviour {
         match event {
             FloodsubEvent::Message(msg) => {
                 //println!("==> Got some response on floodsub. msg: {:?}", std::str::from_utf8(&msg.data));
-                if let Ok(resp) = serde_json::from_slice::<PartySignup>(&msg.data) {
+                if let Ok(resp) = serde_json::from_slice::<PeerInfo>(&msg.data) {
                     
-                    println!("RPartySignup response");
-                    if !self.peer_indeces.contains_key(&resp.uuid) { // means response is for this node
+                    println!("response from new peer comes inn");
+                    if !self.peer_indeces.contains_key(&resp.pid) { // means response is for this node
                         // resp.data.iter().for_each(|r| info!("{:?}", r));
-                        self.peer_indeces.insert(resp.uuid, resp.number);
+                        if self.index == resp.index {
+                            self.index += 1; // try to increment the index as there's someone with already that index
+                        }
+                        self.peer_indeces.insert(resp.pid, resp.index);
                     }
                 }else if let Ok(resp) = serde_json::from_slice::<Entry>(&msg.data){
 
@@ -284,47 +327,17 @@ impl NetworkBehaviourEventProcess<MdnsEvent> for DKG_NW_Behaviour {
     fn inject_event(&mut self, event: MdnsEvent) { // if any peer connects or discconects this will be called
         match event {
             MdnsEvent::Discovered(list) => {
-                println!("\nDiscovered a new peer. nop: {}, pc: {}", &self.num_of_participant, &self.peer_count);
+                
+                let mut i=0;
                 for (peer, _) in list {
+                    if i == 0 {
+                        println!("Peer: {:?}", &peer);
+                        i += 1;
+                    }
                     self.floodsub.add_node_to_partial_view(peer);
                 }
-                uniq_peers(self);
-                if self.num_of_participant > 0 && self.peer_count == self.num_of_participant {
-                    if self.round_which == 0 {
-                        get_keys_with_peer_num(self);
-                        println!("round 1 completed.");
-                        self.round_which += 1;
-                    }
-                    else if self.round_which == 1 {
-
-                        println!("round 2 completed.");
-                        self.round_which += 1;
-                    }
-                    else if self.round_which == 2 {
-
-                        println!("round 3 completed.");
-                        self.round_which += 1;    
-                    }
-                    else if self.round_which == 3 {
-
-                        println!("round 4 completed.");
-                        self.round_which += 1;    
-                    }
-                    else if self.round_which == 4 {
-
-                        println!("round 5 completed.");
-                        self.round_which += 1;    
-                    }
-                    else if self.round_which == 5 {
-
-                        println!("round 6 completed.");
-                        self.round_which += 1;    
-                    }
-                }
-                else{
-                    //println!("peer_indeces: {:?}", self.peer_indeces);
-                    //println!("waiting for the other participants to join for dkg...");
-                }                
+                //uniq_peers(self);
+                               
             },
                 
             MdnsEvent::Expired(list) => {
@@ -374,9 +387,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (response_sender, mut response_rcv) = mpsc::unbounded_channel();
     let peer_indeces:  HashMap<String, usize> = HashMap::new();
     let num_of_participant: usize = 0;
-    let peer_count: usize = 0;
+    let peer_count: usize = 1; // 1; for this node is also counted!
     let threshold: usize = 0;
     let round_which: usize = 0;
+    let index: usize = 0;
     let PID: String = PEER_ID.clone().to_base58();
     
     let mut behaviour = DKG_NW_Behaviour {
@@ -390,6 +404,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         peer_count,
         threshold,
         round_which,
+        index,
         PID,
     };
     
@@ -411,7 +426,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Swarm::KeepAlive::Until(Duration::from_secs(10) as time::Instant);
 
-    Swarm::listen_on(&mut _swarm,"/ip4/0.0.0.0/tcp/5687".parse()?)?;
+    Swarm::listen_on(&mut _swarm,"/ip4/0.0.0.0/tcp/0".parse()?)?;
 
 
     // dkg code starts here
@@ -427,8 +442,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             // branch 1
             resp_to_be_sent = response_rcv.recv() => { // here we take data (response to be sent to other peers) from channel // 4
                 //println!("==> getting from channel: {:?}", &resp_to_be_sent);
-                println!("==> sending to other peer/s. Topic: {:?}", &TOPIC);
-                _swarm.floodsub.publish(TOPIC.clone(), resp_to_be_sent.unwrap().as_bytes());
+                let topic = TOPIC.clone();
+                println!("==> sending to other peer/s. Topic: {:?}", &topic);
+                _swarm.floodsub.publish(topic, resp_to_be_sent.unwrap().as_bytes());
             }
             // branch 2
             event = _swarm.select_next_some() => {
@@ -441,44 +457,44 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 }
 
-fn uniq_peers(_swarm: &mut DKG_NW_Behaviour) {
-    //println!("getting unique peers and then count");
-    let nodes = _swarm.mdns.discovered_nodes();
-    let mut unique_peers = HashSet::new();
-    for peer in nodes {
-        unique_peers.insert(peer);
-    }
-    let count = unique_peers.iter().count();
-    unique_peers.iter().for_each(|p| {
-        //println!("{}", &p)
-    });
-    //println!("peers count: {}", &count);
-    let k = PEER_ID.to_base58();
-    if !_swarm.peer_indeces.contains_key(&k) {
-        //_swarm.peer_indeces.insert(k.clone(), count);
+// fn uniq_peers(_swarm: &mut DKG_NW_Behaviour) {
+//     //println!("getting unique peers and then count");
+//     let nodes = _swarm.mdns.discovered_nodes();
+//     let mut unique_peers = HashSet::new();
+//     for peer in nodes {
+//         unique_peers.insert(peer);
+//     }
+//     let count = unique_peers.iter().count();
+//     unique_peers.iter().for_each(|p| {
+//         //println!("{}", &p)
+//     });
+//     //println!("peers count: {}", &count);
+//     let k = PEER_ID.to_base58();
+//     if !_swarm.peer_indeces.contains_key(&k) {
+//         //_swarm.peer_indeces.insert(k.clone(), count);
         
-        unsafe{
-            PEER_INDEX = count.clone();
-        }
+//         unsafe{
+//             PEER_INDEX = count.clone();
+//         }
         
-    }
+//     }
     
-    if count > 1 {
-        let k = PEER_ID.to_base58();
-        let p = PartySignup {
-            number: match _swarm.peer_indeces.get(&k){
-                Some(&num) => num,
-                _ => panic!(),
-            },
-            uuid: k,
-        };
-        //println!("==> putting over channel");
-        _swarm.response_sender.send(serde_json::to_string(&p).unwrap());
-    }
+//     if count > 1 {
+//         let k = PEER_ID.to_base58();
+//         let p = PartySignup {
+//             number: match _swarm.peer_indeces.get(&k){
+//                 Some(&num) => num,
+//                 _ => panic!(),
+//             },
+//             uuid: k,
+//         };
+//         //println!("==> putting over channel");
+//         _swarm.response_sender.send(serde_json::to_string(&p).unwrap());
+//     }
     
-    _swarm.peer_count = count+1;
-    //println!("peer_indeces: {:?}", &_swarm.peer_indeces);
-}
+//     _swarm.peer_count = count+1;
+//     //println!("peer_indeces: {:?}", &_swarm.peer_indeces);
+// }
 
 
 fn dkg_init(_swarm: &mut DKG_NW_Behaviour) {
@@ -491,12 +507,10 @@ fn dkg_init(_swarm: &mut DKG_NW_Behaviour) {
 }
 
 fn get_keys_with_peer_num(_swarm: &mut DKG_NW_Behaviour) {
-    //println!("[DKG] ==> getting keys");
-    unsafe{
-        let peer_keys = Keys::create(PEER_INDEX);
-        let (bc_i, decom_i) = peer_keys.phase1_broadcast_phase3_proof_of_correct_key();
-        ////println!("[DKG] ==> Keys: bc_i: {:?}, decom_i: {:?}", bc_i, decom_i);
-    }
+    println!("[DKG] ==> getting keys");
+    let peer_keys = Keys::create(_swarm.index);
+    let (bc_i, decom_i) = peer_keys.phase1_broadcast_phase3_proof_of_correct_key();
+    ////println!("[DKG] ==> Keys: bc_i: {:?}, decom_i: {:?}", bc_i, decom_i);
     
     //let str: multi_party_ecdsa::protocols::multi_party_ecdsa::gg_2018::party_i::KeyGenBroadcastMessage1 = bc_i.clone();
     // send commitment to ephemeral public keys, get round 1 commitments of other parties
